@@ -1,0 +1,75 @@
+# Build products and local dependencies
+.build/
+.local/
+dist/
+examples/build/
+vendor/
+.swiftpm/
+DerivedData/
+*.app/
+*.bundle/
+*.dmg
+*.pkg
+*.zip
+*.tar
+*.tar.gz
+
+# Instance workspaces, profiles and recovery copies
+Applications/
+Profiles/
+Staging/
+Retired/
+Containers/
+Group Containers/
+Backups/
+instances.json
+instances.json.*
+launch.json
+.lock
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.keychain*
+
+# Local diagnostics and captures
+logs/
+captures/
+screenshots/
+*.log
+*.crash
+*.ips
+*.trace
+*.tracev3
+*.logarchive/
+*.dmp
+Screenshot*.png
+Screenshot*.jpg
+Screenshot*.jpeg
+Screenshot*.heic
+Screen Recording*.mov
+
+# Credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+credentials*.json
+secrets*.json
+
+# Editor and macOS state
+.DS_Store
+._*
+*.xcuserstate
+xcuserdata/
+.idea/
+.vscode/
+__pycache__/
+*.pyc
