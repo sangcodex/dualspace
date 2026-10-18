@@ -169,6 +169,45 @@ import AppKit
         XCTAssertEqual(model.state(for: record).phase, .missing)
     }
 
+    func testBriefLaunchProcessDoesNotFinishStartupConfirmation() async throws {
+        let action = Task { await model.act(.launch, on: record) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        runtime.pid = nil
+        model.refreshStatus()
+        XCTAssertEqual(model.state(for: record).phase, .starting)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        runtime.pid = 321
+        await action.value
+        XCTAssertEqual(model.state(for: record).phase, .running)
+        XCTAssertEqual(model.pids[record.id], 321)
+    }
+
+    func testProcessExitIsObservedWithoutWorkspaceNotification() async throws {
+        runtime.pid = 42
+        model.refreshStatus()
+        runtime.pid = nil
+        for _ in 0..<30 {
+            if model.state(for: record).phase == .stopped { return }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTFail("The fallback process observation did not update the state")
+    }
+
+    func testUnsupportedAppInspectionEndsWithVisibleError() async throws {
+        let infoURL = URL(fileURLWithPath: record.source.path).appendingPathComponent("Contents/Info.plist")
+        var info = try readPlist(infoURL)
+        info["CFBundleIdentifier"] = "com.ccswitch.desktop"
+        try writePlist(info, to: infoURL)
+        model.select(URL(fileURLWithPath: record.source.path))
+        for _ in 0..<100 {
+            if model.inspectionError != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNil(model.inspection)
+        XCTAssertTrue(model.inspectionError?.contains("unsupported compiled single-instance lock") == true)
+        XCTAssertEqual(model.notice?.text, model.inspectionError)
+    }
+
     private func waitFor(_ phase: InstancePhase) async throws {
         for _ in 0..<100 {
             if model.state(for: record).phase == phase { return }

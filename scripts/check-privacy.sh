@@ -18,6 +18,7 @@ for sample in \
   Retired/example.bundle/Contents/Info.plist backups/instances.json \
   instances.json launch.json local.db local.sqlite-wal logs/app.log \
   app.crash app.ips captures/window.png screenshots/window.png \
+  docs/verification.md docs/design/example.md \
   dist/DualSpace.app/Contents/Info.plist Example.app/Contents/Info.plist \
   installer.dmg backup.zip .env .env.local signing.p12 credentials.json; do
   if ! audit_git check-ignore --no-index -q -- "$sample"; then

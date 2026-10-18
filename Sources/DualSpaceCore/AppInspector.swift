@@ -12,6 +12,10 @@ public struct AppInspector: Sendable {
         let result = try await runner.run("/usr/bin/codesign", ["-d", "--entitlements", "-", "--xml", app.path], timeout: 30)
         let entitlements = entitlementDictionary(result.output)
         var notes: [String] = []
+        if app.bundleID == "com.ccswitch.desktop" {
+            try NativeCompatibility().checkCCSwitch(app)
+            notes.append("CC Switch 3.20.4 uses an adapted single-instance socket and private home on Apple Silicon. If you enable its local proxy, choose a port not used by another instance.")
+        }
         if result.status != 0 || result.errorText.contains("invalid entitlements") {
             notes.append("The source signing entitlements could not be read reliably. App-specific data isolation is unverified.")
         }
@@ -33,7 +37,10 @@ public struct AppInspector: Sendable {
                 notes.append("A private home is configured. Native apps may use fixed paths or external services; verify account separation before daily use.")
             }
         } else {
-            notes.append("A dedicated Chromium profile is configured. Apps can override Chromium's profile option; verify the signed-in account.")
+            notes.append("A private home and dedicated Chromium profile are configured. Runtime helper names are preserved. Verify the signed-in account; apps can override profile options.")
+            if entitlements["com.apple.security.app-sandbox"] as? Bool == true {
+                notes.append("This copy uses a private home instead of the vendor's App Sandbox. Vendor-authorized Mach services cannot be inherited by a locally signed copy.")
+            }
         }
         if let info = try? readPlist(URL(fileURLWithPath: app.path).appendingPathComponent("Contents/Info.plist")), info["CFBundleURLTypes"] != nil {
             notes.append("Custom URL schemes are namespaced for the copy. Browser-based sign-in callbacks may need app-specific support.")

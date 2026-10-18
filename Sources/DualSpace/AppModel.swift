@@ -26,6 +26,7 @@ struct RenameRequest: Identifiable { let record: CloneRecord; var id: UUID { rec
     @Published var draft: AppDescriptor?
     @Published var draftName = ""
     @Published var inspection: Inspection?
+    @Published private(set) var inspectionError: String?
     @Published var renameRequest: RenameRequest?
     @Published var removeRequest: CloneRecord?
     @Published var activity: [String] = []
@@ -56,6 +57,10 @@ struct RenameRequest: Identifiable { let record: CloneRecord; var id: UUID { rec
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in await self?.reload() }
             }.store(in: &observers)
+        // Exec-based apps can disappear from Launch Services notifications.
+        Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+            .sink { [weak self] _ in self?.refreshStatus() }
+            .store(in: &observers)
     }
 
     var pids: [UUID: Int32] { states.compactMapValues(\.pid) }
@@ -145,6 +150,8 @@ struct RenameRequest: Identifiable { let record: CloneRecord; var id: UUID { rec
         do {
             let app = try AppDescriptor.read(url)
             inspection = nil
+            inspectionError = nil
+            notice = nil
             let count = instances.filter { $0.source.bundleID == app.bundleID }.count
             draftName = app.name + (count == 0 ? " Work" : " \(count + 2)")
             draft = app
@@ -152,7 +159,12 @@ struct RenameRequest: Identifiable { let record: CloneRecord; var id: UUID { rec
                 do {
                     let result = try await store.inspect(source: url)
                     if draft?.path == app.path { inspection = result }
-                } catch { report(error.localizedDescription, error: true) }
+                } catch {
+                    if draft?.path == app.path {
+                        inspectionError = error.localizedDescription
+                        report(error.localizedDescription, error: true)
+                    }
+                }
             }
         } catch { report(error.localizedDescription, error: true) }
     }
@@ -226,9 +238,14 @@ struct RenameRequest: Identifiable { let record: CloneRecord; var id: UUID { rec
     private func confirmLaunch(_ record: CloneRecord) async throws {
         // Only a pending launch has a bounded reconciliation loop. Exec may
         // replace the callback process before Launch Services registers it.
+        var previous: Int32?
+        var stable = 0
         for _ in 0..<40 {
             try Task.checkCancellation()
-            if runtime.processID(record, at: store.appURL(record)) != nil { return }
+            let pid = runtime.processID(record, at: store.appURL(record))
+            stable = pid != nil && pid == previous ? stable + 1 : 0
+            if stable >= 5 { return }
+            previous = pid
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         throw SpaceError.message("Startup could not be confirmed. The app may have exited or may still need attention. Try opening it again or check Compatibility Details.")

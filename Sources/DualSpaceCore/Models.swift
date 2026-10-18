@@ -2,12 +2,16 @@
 import Foundation
 
 public enum AppKind: String, Codable, Sendable {
-    case native, chromium
+    case native, chromium, electron
 
-    public var label: String { self == .chromium ? "Chromium / Electron" : "Native app" }
-    public var isolation: String {
-        self == .chromium ? "Dedicated browser profile" : "Private home; app data needs verification"
+    public var label: String {
+        switch self {
+        case .native: return "Native app"
+        case .chromium: return "Chromium browser"
+        case .electron: return "Electron app"
+        }
     }
+    public var usesChromium: Bool { self == .chromium || self == .electron }
 }
 
 /// Reads bundle metadata without caching it across an application update.
@@ -42,16 +46,17 @@ public struct AppDescriptor: Codable, Sendable, Identifiable, Equatable {
             throw SpaceError.message("Choose the original application, rather than an existing DualSpace copy.")
         }
         let fm = FileManager.default
-        let isChromium = fm.fileExists(atPath: url.appendingPathComponent("Contents/Resources/app.asar").path)
+        let isElectron = fm.fileExists(atPath: url.appendingPathComponent("Contents/Resources/app.asar").path)
             || fm.fileExists(atPath: url.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path)
-            || fm.fileExists(atPath: url.appendingPathComponent("Contents/Frameworks/Google Chrome Framework.framework").path)
             || (info["NSPrincipalClass"] as? String) == "AtomApplication"
+        let isChromium = fm.fileExists(atPath: url.appendingPathComponent("Contents/Frameworks/Google Chrome Framework.framework").path)
+            || (info["NSPrincipalClass"] as? String) == "BrowserCrApplication"
         return AppDescriptor(
             path: url.path, bundleID: bundleID,
             name: (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String) ?? url.deletingPathExtension().lastPathComponent,
             version: (info["CFBundleShortVersionString"] as? String) ?? "Unknown",
             build: (info["CFBundleVersion"] as? String) ?? "Unknown",
-            executable: executable, kind: isChromium ? .chromium : .native
+            executable: executable, kind: isElectron ? .electron : (isChromium ? .chromium : .native)
         )
     }
 }
@@ -63,11 +68,18 @@ public struct CloneRecord: Codable, Identifiable, Sendable, Equatable {
     public let createdAt: Date
     public var updatedAt: Date
     public var notes: [String]
+    // Persisted storage layout. Rebuilt Electron apps retain this location
+    // while runsInSandbox describes their current execution permissions.
     public var usesSandbox: Bool?
     public var appFileName: String?
     public var nativeSandbox: Bool { source.kind == .native && usesSandbox == true }
+    public var runsInSandbox: Bool { nativeSandbox }
     var privateWeChat: Bool { source.bundleID == "com.tencent.xinWeChat" && source.kind == .native && usesSandbox != true }
     var usesBootstrap: Bool { !nativeSandbox && !privateWeChat }
+    public var isolation: String {
+        if runsInSandbox { return "Private sandbox container" }
+        return source.kind.usesChromium ? "Dedicated app data and private home" : "Private home"
+    }
     public var bundleID: String { "local.dualspace.instance.i" + id.uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
     public var folderName: String { appFileName ?? (id.uuidString.lowercased() + ".app") }
 }
@@ -81,7 +93,7 @@ public struct Inspection: Sendable {
     public let app: AppDescriptor
     public let notes: [String]
     public let sandboxed: Bool?
-    public var copyUsesSandbox: Bool { sandboxed == true && app.bundleID != "com.tencent.xinWeChat" }
+    public var copyUsesSandbox: Bool { sandboxed == true && app.kind == .native && app.bundleID != "com.tencent.xinWeChat" }
 }
 
 public enum SpaceError: LocalizedError {

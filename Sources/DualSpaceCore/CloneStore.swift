@@ -42,6 +42,13 @@ public actor CloneStore {
         return root.appendingPathComponent("Profiles/\(record.id.uuidString.lowercased())")
     }
 
+    public nonisolated func homeURL(_ record: CloneRecord) -> URL {
+        if record.usesSandbox == true {
+            return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Containers/\(record.bundleID)/Data")
+        }
+        return profileURL(record)
+    }
+
     public func list() throws -> [CloneRecord] {
         try ensureDirectories()
         return try load().instances.sorted { $0.createdAt < $1.createdAt }
@@ -105,7 +112,9 @@ public actor CloneStore {
         if record.usesSandbox != report.copyUsesSandbox {
             record.notes = report.notes.filter { !$0.hasPrefix("This WeChat copy uses") && !$0.hasPrefix("The copy uses a distinct") && !$0.hasPrefix("A private home is configured") }
             record.notes.append(record.usesSandbox == true
-                ? "This instance retains its existing macOS sandbox container. Its data location has not been migrated."
+                ? (record.runsInSandbox
+                   ? "This instance retains its existing macOS sandbox container. Its data location has not been migrated."
+                   : "This instance keeps its existing container data directory. It now runs with a private home; no account files were moved.")
                 : "This instance retains its existing private home. Its data location has not been migrated.")
         }
         record.updatedAt = Date()
@@ -164,6 +173,12 @@ public actor CloneStore {
         guard let record = try load().instances.first(where: { $0.id == id }) else { throw missing() }
         let url = appURL(record)
         let info = try readPlist(url.appendingPathComponent("Contents/Info.plist"))
+        if record.source.bundleID == "com.ccswitch.desktop", info["DualSpaceNativeIdentity"] as? String == nil {
+            throw SpaceError.message("Rebuild this CC Switch instance to isolate its single-instance socket before opening it.")
+        }
+        if record.source.kind == .chromium, info["NSPrincipalClass"] as? String == "AtomApplication" {
+            throw SpaceError.message("Rebuild this Electron instance to repair its helper names and launch permissions. Its existing profile will be kept.")
+        }
         guard info["CFBundleIdentifier"] as? String == record.bundleID,
               info["DualSpaceInstanceID"] as? String == id.uuidString,
               let executable = info["CFBundleExecutable"] as? String,
@@ -252,7 +267,7 @@ public actor CloneStore {
     }
 
     private func ensureStopped(_ record: CloneRecord) async throws {
-        let running = await MainActor.run { InstanceRuntime.running(record, at: self.appURL(record)) != nil }
+        let running = await MainActor.run { InstanceRuntime().processID(record, at: self.appURL(record)) != nil }
         guard !running else { throw SpaceError.message("Quit \(record.name) before changing its application files.") }
     }
 }

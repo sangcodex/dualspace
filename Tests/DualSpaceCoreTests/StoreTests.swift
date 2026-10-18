@@ -92,7 +92,110 @@ final class StoreTests: XCTestCase {
         var info = try readPlist(infoURL)
         info["NSPrincipalClass"] = "AtomApplication"
         try writePlist(info, to: infoURL)
-        XCTAssertEqual(try AppDescriptor.read(source).kind, .chromium)
+        XCTAssertEqual(try AppDescriptor.read(source).kind, .electron)
+    }
+
+    func testElectronKeepsHelperProductNameAndUsesPrivateHome() async throws {
+        let infoURL = source.appendingPathComponent("Contents/Info.plist")
+        var info = try readPlist(infoURL)
+        info["NSPrincipalClass"] = "AtomApplication"
+        info["ElectronTeamID"] = "VENDOR"
+        try writePlist(info, to: infoURL)
+        await runner.setReportedSandbox(true)
+        let framework = source.appendingPathComponent("Contents/Frameworks/Electron Framework.framework/Resources/Info.plist")
+        try FileManager.default.createDirectory(at: framework.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try writePlist(["CFBundleIdentifier": "test.original.framework"], to: framework)
+        let record = try await store.create(source: source, name: "Electron Work")
+        let copied = try readPlist(store.appURL(record).appendingPathComponent("Contents/Info.plist"))
+        XCTAssertEqual(copied["CFBundleName"] as? String, "Example")
+        XCTAssertEqual(copied["CFBundleDisplayName"] as? String, "Electron Work")
+        XCTAssertTrue((copied["CFBundleExecutable"] as? String)?.hasPrefix("DualSpaceBoot-") == true)
+        XCTAssertNil(copied["ElectronTeamID"])
+        let launch = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: store.appURL(record).appendingPathComponent("Contents/Resources/DualSpaceLaunch.json"))) as? [String: Any])
+        XCTAssertEqual(launch["homePath"] as? String, store.homeURL(record).path)
+        XCTAssertFalse(record.runsInSandbox)
+        let copiedFramework = store.appURL(record).appendingPathComponent("Contents/Frameworks/Electron Framework.framework/Resources/Info.plist")
+        XCTAssertEqual(try readPlist(copiedFramework)["CFBundleIdentifier"] as? String, "test.original.framework")
+        let flags = await runner.sandboxFlags()
+        XCTAssertFalse(flags.values.contains(true))
+        let jit = await runner.jitFlags()
+        XCTAssertEqual(jit.first(where: { $0.key.hasSuffix("/Frameworks/Electron Framework.framework") })?.value, true)
+    }
+
+    func testLegacyElectronRebuildKeepsContainerAndProfileLocations() async throws {
+        let infoURL = source.appendingPathComponent("Contents/Info.plist")
+        var info = try readPlist(infoURL)
+        info["NSPrincipalClass"] = "BrowserCrApplication"
+        try writePlist(info, to: infoURL)
+        let original = try await store.create(source: source, name: "Legacy Electron")
+        let manifestURL = store.root.appendingPathComponent("instances.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var manifest = try decoder.decode(Manifest.self, from: Data(contentsOf: manifestURL))
+        manifest.instances[0].usesSandbox = true
+        let legacy = manifest.instances[0]
+        let profile = store.profileURL(legacy)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(manifest).write(to: manifestURL)
+        info["NSPrincipalClass"] = "AtomApplication"
+        try writePlist(info, to: infoURL)
+        await runner.setReportedSandbox(true)
+        let refreshed = try await store.refresh(id: original.id)
+        XCTAssertEqual(refreshed.id, original.id)
+        XCTAssertEqual(refreshed.source.kind, .electron)
+        XCTAssertTrue(refreshed.usesBootstrap)
+        XCTAssertEqual(store.profileURL(refreshed), profile)
+        XCTAssertEqual(store.homeURL(refreshed), store.homeURL(legacy))
+        XCTAssertFalse(refreshed.runsInSandbox)
+        let configURL = store.appURL(refreshed).appendingPathComponent("Contents/Resources/DualSpaceLaunch.json")
+        let config = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any])
+        XCTAssertEqual(config["homePath"] as? String, store.homeURL(legacy).path)
+        XCTAssertEqual(config["profilePath"] as? String, profile.path)
+        XCTAssertEqual(config["useSandboxHome"] as? Bool, false)
+        let flags = await runner.sandboxFlags()
+        XCTAssertFalse(flags.values.contains(true))
+    }
+
+    func testUnsupportedCCSwitchBuildFailsBeforePublishingACopy() async throws {
+        let infoURL = source.appendingPathComponent("Contents/Info.plist")
+        var info = try readPlist(infoURL)
+        info["CFBundleIdentifier"] = "com.ccswitch.desktop"
+        info["CFBundleShortVersionString"] = "3.20.4"
+        try writePlist(info, to: infoURL)
+        do { _ = try await store.create(source: source, name: "Unsupported"); XCTFail("Expected artifact validation") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("unsupported compiled single-instance lock")) }
+        let records = try await store.list()
+        XCTAssertTrue(records.isEmpty)
+        let targets = await runner.targets()
+        XCTAssertTrue(targets.isEmpty)
+    }
+
+    func testVersionedFrameworkPassesRealDeepSignatureVerification() async throws {
+        let fm = FileManager.default
+        let main = source.appendingPathComponent("Contents/MacOS/Example")
+        try fm.removeItem(at: main)
+        try fm.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: main)
+        let framework = source.appendingPathComponent("Contents/Frameworks/Engine.framework")
+        let real = CommandRunner()
+        for version in ["A", "B"] {
+            let directory = framework.appendingPathComponent("Versions/\(version)")
+            try fm.createDirectory(at: directory.appendingPathComponent("Resources"), withIntermediateDirectories: true)
+            try fm.copyItem(at: URL(fileURLWithPath: version == "A" ? "/usr/bin/true" : "/usr/bin/false"), to: directory.appendingPathComponent("Engine"))
+            try writePlist(["CFBundleIdentifier": "test.original.engine", "CFBundleExecutable": "Engine", "CFBundlePackageType": "FMWK"], to: directory.appendingPathComponent("Resources/Info.plist"))
+            _ = try await real.checked("/usr/bin/codesign", ["--force", "--sign", "-", "--requirements", "=designated => identifier \"test.original.engine\"", directory.path])
+        }
+        for (link, destination) in [("Versions/Current", "B"), ("Resources", "Versions/Current/Resources"), ("Engine", "Versions/Current/Engine")] {
+            try fm.createSymbolicLink(atPath: framework.appendingPathComponent(link).path, withDestinationPath: destination)
+        }
+        _ = try await real.checked("/usr/bin/codesign", ["--force", "--sign", "-", source.path])
+        let realStore = CloneStore(root: store.root, launcher: store.launcher, runner: real)
+        let record = try await realStore.create(source: source, name: "Versioned Framework")
+        try await realStore.verify(id: record.id)
+        for version in ["A", "B"] {
+            let directory = realStore.appURL(record).appendingPathComponent("Contents/Frameworks/Engine.framework/Versions/\(version)")
+            _ = try await real.checked("/usr/bin/codesign", ["--verify", "--deep", "--strict", directory.path])
+        }
     }
 
     func testRefreshAndRenamePreserveIdentityAndProfile() async throws {

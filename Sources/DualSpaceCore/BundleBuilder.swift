@@ -22,7 +22,9 @@ extension CloneStore {
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bootURL.path)
         }
         info["CFBundleIdentifier"] = record.bundleID
-        info["CFBundleName"] = record.name
+        // Electron derives helper executable names from CFBundleName. Keep
+        // the runtime product name; CFBundleDisplayName labels the copy.
+        if !record.source.kind.usesChromium { info["CFBundleName"] = record.name }
         info["CFBundleDisplayName"] = record.name
         info["CFBundleExecutable"] = record.usesBootstrap ? bootName : record.source.executable
         info["DualSpaceInstanceID"] = record.id.uuidString
@@ -32,8 +34,16 @@ extension CloneStore {
         info["SUEnableAutomaticChecks"] = false
         info["SUAutomaticallyUpdate"] = false
         info["SUAllowsAutomaticUpdates"] = false
-        if record.privateWeChat {
-            try configureWeChatHome(record, info: &info)
+        if !record.runsInSandbox && !record.usesBootstrap {
+            try configurePrivateHome(record, info: &info)
+        }
+        if record.source.kind == .electron {
+            info["ElectronTeamID"] = nil
+        }
+        if record.source.bundleID == "com.ccswitch.desktop" {
+            try await NativeCompatibility().prepareCCSwitch(record, at: destination, runner: runner)
+            info["DualSpaceNativeIdentity"] = NativeCompatibility.ccSwitchIdentity(record.id)
+            info["LSArchitecturePriority"] = ["arm64"]
         }
         if var types = info["CFBundleURLTypes"] as? [[String: Any]] {
             let suffix = "-ds-" + record.id.uuidString.prefix(8).lowercased()
@@ -47,7 +57,7 @@ extension CloneStore {
         }
         try writePlist(info, to: infoURL)
         try rewriteNestedIdentities(in: destination, sourceID: record.source.bundleID, targetID: record.bundleID)
-        let config: [String: Any] = ["executable": record.source.executable, "profilePath": profileURL(record).path, "kind": record.source.kind.rawValue, "useSandboxHome": record.usesSandbox == true]
+        let config: [String: Any] = ["executable": record.source.executable, "profilePath": profileURL(record).path, "homePath": homeURL(record).path, "kind": record.source.kind.rawValue, "useSandboxHome": record.runsInSandbox, "ccSwitchHome": record.source.bundleID == "com.ccswitch.desktop"]
         let resources = destination.appendingPathComponent("Contents/Resources")
         try fm.createDirectory(at: resources, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]).write(to: resources.appendingPathComponent("DualSpaceLaunch.json"), options: .atomic)
@@ -60,11 +70,14 @@ extension CloneStore {
         try Task.checkCancellation()
     }
 
-    private func configureWeChatHome(_ record: CloneRecord, info: inout [String: Any]) throws {
-        let profile = profileURL(record)
+    private func configurePrivateHome(_ record: CloneRecord, info: inout [String: Any]) throws {
+        let profile = homeURL(record)
         for child in ["", "Library/Application Support", "Library/Caches", "Library/Preferences", "tmp"] {
             let directory = profile.appendingPathComponent(child)
-            guard directory.resolvingSymlinksInPath().path.hasPrefix(root.path + "/Profiles/") else {
+            let resolved = directory.resolvingSymlinksInPath().path
+            let expected = profile.standardizedFileURL.path
+            guard (resolved == expected || resolved.hasPrefix(expected + "/")),
+                  record.usesSandbox == true || resolved.hasPrefix(root.path + "/Profiles/") else {
                 throw SpaceError.message("The private home points outside the managed profiles directory.")
             }
             try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -72,16 +85,17 @@ extension CloneStore {
         var environment = info["LSEnvironment"] as? [String: String] ?? [:]
         environment["HOME"] = profile.path
         environment["CFFIXED_USER_HOME"] = profile.path
-        environment["DUALSPACE_PROFILE"] = profile.path
+        environment["DUALSPACE_PROFILE"] = profileURL(record).path
         environment["TMPDIR"] = profile.appendingPathComponent("tmp").path + "/"
         environment["XDG_CONFIG_HOME"] = profile.appendingPathComponent("Library/Application Support").path
         environment["XDG_CACHE_HOME"] = profile.appendingPathComponent("Library/Caches").path
+        if record.source.bundleID == "com.ccswitch.desktop" { environment["CC_SWITCH_TEST_HOME"] = profile.path }
         info["LSEnvironment"] = environment
         // WeChat prepends this plist value to its Crashpad Mach service names.
         // Keeping Tencent's prefix makes our existing 57-byte IDs exceed the
         // 128-byte bootstrap limit. An empty prefix preserves the account path
         // and lets the parent and AppEx agree on the local service namespace.
-        info["TeamIdentifier"] = ""
+        if record.privateWeChat { info["TeamIdentifier"] = "" }
     }
 
     func validate(_ record: CloneRecord, at url: URL) async throws {
@@ -115,6 +129,8 @@ extension CloneStore {
         for case let url as URL in entries where url.lastPathComponent == "Info.plist" && url.path != root.appendingPathComponent("Contents/Info.plist").path {
             if try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true { continue }
             guard var info = try? readPlist(url), let identifier = info["CFBundleIdentifier"] as? String else { continue }
+            let bundleType = url.deletingLastPathComponent().deletingLastPathComponent().pathExtension
+            guard ["app", "xpc", "appex"].contains(bundleType) else { continue }
             if identifier == sourceID || identifier.hasPrefix(sourceID + ".") {
                 info["CFBundleIdentifier"] = targetID + identifier.dropFirst(sourceID.count)
             } else if sourceID == "com.tencent.xinWeChat",
@@ -145,7 +161,7 @@ extension CloneStore {
         let originalExecutable = root.appendingPathComponent("Contents/MacOS/\(source.executable)")
         let rootReport = try await runner.run("/usr/bin/codesign", ["-d", "--entitlements", "-", "--xml", originalExecutable.path], timeout: 30)
         var rootEntitlements = sanitized(entitlementDictionary(rootReport.output), kind: source.kind)
-        if record.usesSandbox == true {
+        if record.runsInSandbox {
             rootEntitlements["com.apple.security.app-sandbox"] = true
         }
         let rootID = try readPlist(root.appendingPathComponent("Contents/Info.plist"))["CFBundleIdentifier"] as? String
@@ -160,15 +176,9 @@ extension CloneStore {
                 entitlements = rootEntitlements
             }
             if (target == root && record.usesBootstrap) || target.lastPathComponent.hasPrefix("DualSpaceBoot-") {
-                // The bootstrap only prepares a managed profile; the original
-                // executable enters its own sandbox after exec.
-                if record.usesSandbox != true { entitlements = ["com.apple.security.cs.disable-library-validation": true] }
+                entitlements = ["com.apple.security.cs.disable-library-validation": true]
             }
-            if record.usesBootstrap && record.usesSandbox == true && target == originalExecutable {
-                entitlements = ["com.apple.security.app-sandbox": true, "com.apple.security.inherit": true, "com.apple.security.cs.disable-library-validation": true]
-                if source.kind == .chromium { entitlements["com.apple.security.cs.allow-jit"] = true; entitlements["com.apple.security.cs.allow-unsigned-executable-memory"] = true }
-            }
-            if record.usesSandbox != true {
+            if !record.runsInSandbox {
                 // The bootstrap and its exec target must use the same mode;
                 // sandbox activation here would replace the private HOME.
                 entitlements["com.apple.security.app-sandbox"] = nil
@@ -177,6 +187,17 @@ extension CloneStore {
             let entitlementURL = temporary.appendingPathComponent("entitlements-\(index).plist")
             try writePlist(entitlements, to: entitlementURL)
             var arguments = ["--force", "--sign", "-", "--options", "runtime", "--timestamp=none", "--entitlements", entitlementURL.path]
+            // Ad-hoc signatures default to a hash-specific requirement. A
+            // containing app checks every framework version against Current's
+            // requirement, so versions must share an explicit signing identity.
+            let frameworkVersion = target.deletingLastPathComponent().lastPathComponent == "Versions"
+                && target.deletingLastPathComponent().deletingLastPathComponent().pathExtension == "framework"
+            if target.pathExtension == "framework" || frameworkVersion,
+               let metadata = try? readPlist(target.appendingPathComponent("Resources/Info.plist")),
+               let identifier = metadata["CFBundleIdentifier"] as? String {
+                let escaped = identifier.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                arguments += ["--identifier", identifier, "--requirements", "=designated => identifier \"\(escaped)\""]
+            }
             if target == originalExecutable, let rootID { arguments += ["--identifier", rootID] }
             arguments.append(target.path)
             _ = try await runner.checked("/usr/bin/codesign", arguments, timeout: 120)
@@ -192,6 +213,15 @@ extension CloneStore {
                 if values.isSymbolicLink == true { continue }
                 if ["app", "xpc", "appex", "framework"].contains(url.pathExtension) {
                     bundles.append(url)
+                    if url.pathExtension == "framework" {
+                        let versions = url.appendingPathComponent("Versions")
+                        if fm.fileExists(atPath: versions.path) {
+                            for version in try fm.contentsOfDirectory(at: versions, includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]) {
+                                let metadata = try version.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+                                if metadata.isDirectory == true && metadata.isSymbolicLink != true { bundles.append(version) }
+                            }
+                        }
+                    }
                 } else if ["bundle", "plugin"].contains(url.pathExtension),
                           let info = try? readPlist(url.appendingPathComponent("Contents/Info.plist")),
                           info["CFBundleExecutable"] != nil {
@@ -210,7 +240,7 @@ extension CloneStore {
         // Local signatures have no vendor Team ID. The copied process must load
         // its locally signed libraries; the source bundle is never re-signed.
         result["com.apple.security.cs.disable-library-validation"] = true
-        if kind == .chromium {
+        if kind.usesChromium {
             result["com.apple.security.cs.allow-jit"] = true
             result["com.apple.security.cs.allow-unsigned-executable-memory"] = true
         }

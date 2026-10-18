@@ -14,6 +14,9 @@ DerivedData/
 *.tar
 *.tar.gz
 
+# Local design and verification notes
+/docs/
+
 # Instance workspaces, profiles and recovery copies
 Applications/
 Profiles/

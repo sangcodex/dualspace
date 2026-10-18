@@ -264,7 +264,7 @@ struct InstanceCard: View {
                 Menu {
                     Button("Open Original App") { model.openOriginal(record) }
                     Button("Show Copy in Finder") { model.reveal(model.store.appURL(record)) }
-                    Button("Show Profile Folder") { model.reveal(model.store.profileURL(record)) }
+                    Button("Show Profile Folder") { model.reveal(model.store.homeURL(record)) }
                     Divider()
                     Button("Rebuild from Original") { Task { await model.act(.refresh, on: record) } }.disabled(model.pids[record.id] != nil)
                     Button("Rename…") { model.renameRequest = RenameRequest(record: record) }.disabled(model.pids[record.id] != nil)
@@ -290,7 +290,7 @@ struct InstanceCard: View {
             Rectangle().fill(.white.opacity(0.06)).frame(height: 1)
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(record.nativeSandbox ? "Private sandbox container" : (record.source.kind == .chromium ? "Dedicated profile" : "Separate app identity")).font(.system(size: 10, weight: .medium))
+                    Text(record.isolation).font(.system(size: 10, weight: .medium))
                     Text("Account separation: verify in app").font(.system(size: 9)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -305,10 +305,10 @@ struct InstanceCard: View {
         .sheet(isPresented: $details) {
             VStack(alignment: .leading, spacing: 18) {
                 HStack { Text(record.name).font(.title2.bold()); Spacer(); Button("Done") { details = false } }
-                Text(record.source.kind.isolation).font(.headline)
+                Text(record.isolation).font(.headline)
                 ForEach(record.notes, id: \.self) { note in Label { Text(note).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: "info.circle").foregroundStyle(.secondary) } }
                 Divider()
-                Text("Bundle ID: \(record.bundleID)\nProfile: \(model.store.profileURL(record).path)").font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+                Text("Bundle ID: \(record.bundleID)\nData: \(model.store.homeURL(record).path)").font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
             }.padding(28).frame(width: 600)
         }
     }
@@ -338,7 +338,7 @@ struct CreateView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     if let inspection = model.inspection {
                         ForEach(inspection.notes, id: \.self) { Text($0).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
-                    } else { ProgressView().controlSize(.small) }
+                    } else if model.inspectionError == nil { ProgressView().controlSize(.small) }
                 }.padding(.top, 12)
             }.font(.system(size: 11))
             if let notice = model.notice, notice.isError { Text(notice.text).font(.system(size: 11)).foregroundStyle(.orange).textSelection(.enabled) }

@@ -39,6 +39,7 @@ import DualSpaceCore
                     let runtime = InstanceRuntime()
                     if command == "quit" { try await runtime.quit(record, at: store.appURL(record)); print("Quit requested.") }
                     else {
+                        _ = try await store.preflight(id: record.id)
                         let pid = try await runtime.launch(record, at: store.appURL(record))
                         print(pid > 0 ? "PID \(pid)" : "The copy was opened; the system did not expose its process identifier.")
                     }
